@@ -1,0 +1,11 @@
+rootProject.name = 'okx-hft'
+
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+    }
+}
+
+include 'hft-common'
+include 'okx-feed-handler'
+include 'trading-api-service'

@@ -1,0 +1,44 @@
+spring:
+  application:
+    name: okx-feed-handler
+
+server:
+  port: 8081
+
+# --- QuestDB Connection (official questdb-client) ---
+# The Sender buffers rows in-memory and flushes when EITHER threshold is hit:
+#   auto-flush-rows     → flush after N rows buffered
+#   auto-flush-interval → flush after N ms since last flush
+# For near real-time visibility in QuestDB queries, keep both values LOW.
+# Tradeoff: smaller batches = lower latency but slightly higher overhead per flush.
+questdb:
+  http-host: localhost
+  http-port: 9000
+  rest-base-url: http://localhost:9000
+  auto-flush-rows: 100
+  auto-flush-interval-ms: 100
+  retry-timeout-ms: 10000
+
+# --- OKX v5 WebSocket API ---
+okx:
+  ws-url: wss://ws.okx.com:8443/ws/v5/public
+  symbols:
+    - BTC-USDT
+    - ETH-USDT
+    - SOL-USDT
+  channels:
+    - trades
+    - books5
+  reconnect-delay-sec: 5
+
+logging:
+  level:
+    vn.com.baothi.okxfeed: INFO
+    reactor.netty: WARN
+
+# --- Reactor Netty tuning ---
+reactor:
+  netty:
+    pool:
+      max-connections: 50
+

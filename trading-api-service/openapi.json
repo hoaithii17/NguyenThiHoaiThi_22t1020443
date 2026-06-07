@@ -1,0 +1,612 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OKX HFT Trading API Service",
+    "description": "REST & SSE streaming API for the OKX High-Frequency Trading demo.\nPowered by QuestDB time-series database with real-time OKX market data ingestion.\n\nAll data is sourced exclusively from **QuestDB via R2DBC** — the feed handler service\n(okx-feed-handler) is the single ingestion point from OKX WebSocket. This service is\na **pure read layer** and never connects to OKX directly.\n\n## Transport\n\n- All endpoints are served over **HTTPS/H2** on port `8443`.\n- TLS uses an **ECDSA P-256** leaf certificate issued by a local mkcert CA — see the project README for setup.\n- **HTTP/2** multiplexes all SSE streams over a single TCP connection, eliminating the browser's 6-connection-per-host limit that plagued HTTP/1.1 SSE.\n\n## SSE Streaming\n\nAll `/api/stream/*` endpoints return `text/event-stream` responses.\n\n- **Immediate first poll**: data arrives within milliseconds of subscribing (no initial delay).\n- **Heartbeat keepalive**: a `:heartbeat` SSE comment is sent every 15s to keep the connection alive.\n- **`:connected` comment**: sent immediately on subscribe to flush HTTP response headers.\n- **Delta-polling**: tick-level streams (trades, orderbook, spread, candles) poll QuestDB every 500ms; indicator streams (RSI, Bollinger, VWAP) poll every 3s.\n- **Graceful shutdown**: all streams terminate cleanly on server shutdown.",
+    "version": "2.0.0",
+    "contact": {
+      "name": "Bao Thi",
+      "url": "https://github.com/baothi"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://localhost:8443",
+      "description": "Local development (HTTPS/H2 — mkcert ECDSA P-256)"
+    }
+  ],
+  "tags": [
+    { "name": "Trades", "description": "Trade execution data from OKX" },
+    { "name": "Candles", "description": "OHLCV candlestick data from QuestDB materialized views" },
+    { "name": "Order Book", "description": "Top-5 order book levels and spread analytics" },
+    { "name": "Indicators", "description": "Technical indicators computed by QuestDB window functions" },
+    { "name": "Streaming", "description": "Real-time Server-Sent Events (SSE) streams over HTTP/2" }
+  ],
+  "paths": {
+    "/api/trades": {
+      "get": {
+        "operationId": "getTrades",
+        "summary": "Get recent trades",
+        "description": "Returns recent trades for a symbol from the last hour, ordered by timestamp descending.",
+        "tags": ["Trades"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of trades to return",
+            "schema": { "type": "integer", "default": 100, "minimum": 1, "maximum": 1000 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of recent trades",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Trade" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/candles": {
+      "get": {
+        "operationId": "getCandles",
+        "summary": "Get OHLCV candles",
+        "description": "Returns OHLCV candlestick data for the last 24 hours. Uses QuestDB materialized views for standard intervals (5s, 1m, 1h). Falls back to dynamic SAMPLE BY for custom intervals.",
+        "tags": ["Candles"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          {
+            "name": "interval",
+            "in": "query",
+            "required": false,
+            "description": "Candle interval. 5s, 1m, 1h use pre-computed materialized views; others use dynamic SAMPLE BY.",
+            "schema": { "type": "string", "default": "5s", "enum": ["5s", "15s", "30s", "1m", "15m", "30m", "1h"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of OHLCV candles",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Candle" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orderbook": {
+      "get": {
+        "operationId": "getOrderBook",
+        "summary": "Get latest order book",
+        "description": "Returns the latest top-5 bid/ask order book snapshot using QuestDB LATEST ON. Returns a single object (not an array).",
+        "tags": ["Order Book"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest order book snapshot (single object)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OrderBook" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orderbook/spread": {
+      "get": {
+        "operationId": "getSpreadHistory",
+        "summary": "Get spread history",
+        "description": "Returns bid-ask spread history aggregated using QuestDB SAMPLE BY over the last hour.",
+        "tags": ["Order Book"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          {
+            "name": "interval",
+            "in": "query",
+            "required": false,
+            "description": "Aggregation interval for spread sampling",
+            "schema": { "type": "string", "default": "5s", "enum": ["1s", "5s", "15s", "1m"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of spread snapshots",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Spread" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/indicators/vwap": {
+      "get": {
+        "operationId": "getVwap",
+        "summary": "Get VWAP",
+        "description": "Returns Volume Weighted Average Price computed using QuestDB CUMULATIVE window function over the last hour in 5s buckets.",
+        "tags": ["Indicators"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of up to 500 rows, ordered by ts descending",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/VwapPoint" } },
+                "example": [
+                  { "ts": "2026-03-26T15:34:35Z", "close": 69144.9, "vwap": 69034.20 }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/indicators/bollinger": {
+      "get": {
+        "operationId": "getBollingerBands",
+        "summary": "Get Bollinger Bands",
+        "description": "Returns 20-period Bollinger Bands (SMA ± 2σ) computed using QuestDB window functions over the last hour in 5s buckets.",
+        "tags": ["Indicators"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of up to 500 rows, ordered by ts descending",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/BollingerBandPoint" } },
+                "example": [
+                  { "ts": "2026-03-26T15:34:35Z", "close": 69144.9, "sma20": 68994.375, "upperBand": 69069.50, "lowerBand": 68919.25 }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/indicators/rsi": {
+      "get": {
+        "operationId": "getRsi",
+        "summary": "Get RSI (14-period)",
+        "description": "Returns 14-period Relative Strength Index (SMA-smoothed) computed using QuestDB window functions with LAG over the last hour in 5s buckets.",
+        "tags": ["Indicators"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of up to 500 rows, ordered by ts descending",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/RsiPoint" } },
+                "example": [
+                  { "ts": "2026-03-26T15:34:35Z", "close": 69144.9, "rsi": 32.89 }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/indicators/stats": {
+      "get": {
+        "operationId": "getStats",
+        "summary": "Get trading stats",
+        "description": "Returns aggregated trading statistics for the last 24 hours. Demonstrates QuestDB aggregation speed.",
+        "tags": ["Indicators"],
+        "responses": {
+          "200": {
+            "description": "Single-element array with aggregate stats",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StatsRow" } },
+                "example": [
+                  {
+                    "total_trades": 30975,
+                    "symbols": 3,
+                    "total_volume_usd": 27780546.73,
+                    "first_trade": "2026-03-25T16:42:07.161Z",
+                    "last_trade": "2026-03-26T15:34:38.286Z"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/indicators/symbols": {
+      "get": {
+        "operationId": "getSymbols",
+        "summary": "Get available symbols",
+        "description": "Returns the list of distinct trading pair symbols currently available in QuestDB.",
+        "tags": ["Indicators"],
+        "responses": {
+          "200": {
+            "description": "List of symbol strings",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "type": "string" } },
+                "example": ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream/trades": {
+      "get": {
+        "operationId": "streamTrades",
+        "summary": "Stream trades (SSE)",
+        "description": "Near real-time Server-Sent Events stream over HTTP/2.\n\nDelta-polls QuestDB every 500ms for new trades since the last-seen timestamp, emitting **each trade as an individual SSE event**.\n\n**Wire format:** `event: trade` with a single `Trade` JSON object in `data`.\n\n**Keepalive:** `:heartbeat` comment every 15s.\n\n**First poll:** immediate (no initial delay).\n\n**Browser usage:** `new EventSource('https://localhost:8443/api/stream/trades?symbol=BTC-USDT')` then listen for `trade` events.",
+        "tags": ["Streaming"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of individual trade events",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseTradeEvent" },
+                "example": ":connected\n\nid:1\nevent:trade\ndata:{\"ts\":\"2026-03-28T10:15:30.289Z\",\"symbol\":\"BTC-USDT\",\"side\":\"sell\",\"price\":69144.9,\"amount\":0.0013705}\n\nid:2\nevent:trade\ndata:{\"ts\":\"2026-03-28T10:15:30.492Z\",\"symbol\":\"BTC-USDT\",\"side\":\"buy\",\"price\":69145.0,\"amount\":0.000144}\n\n:heartbeat\n"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream/orderbook": {
+      "get": {
+        "operationId": "streamOrderBook",
+        "summary": "Stream order book (SSE)",
+        "description": "Polls the latest order book snapshot from QuestDB every 500ms using QuestDB `LATEST ON` for single-row retrieval.\n\n**Wire format:** `event: orderbook` with a single `OrderBook` JSON object in `data`.\n\n**Keepalive:** `:heartbeat` comment every 15s.",
+        "tags": ["Streaming"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of order book snapshots (single object per event)",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseOrderBookEvent" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream/spread": {
+      "get": {
+        "operationId": "streamSpread",
+        "summary": "Stream spread (SSE)",
+        "description": "Polls the latest bid-ask spread from QuestDB (derived from the latest order book via `LATEST ON`) every 500ms.\n\n**Wire format:** `event: spread` with a single `Spread` JSON object in `data`.\n\n**Keepalive:** `:heartbeat` comment every 15s.",
+        "tags": ["Streaming"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of spread snapshots",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseSpreadEvent" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream/candles": {
+      "get": {
+        "operationId": "streamCandles",
+        "summary": "Stream candles (SSE)",
+        "description": "Delta-polls QuestDB every 500ms for new candles since the last-seen timestamp (same `TICK_POLL_INTERVAL` as trades/orderbook, so candle close prices stay in sync with trade events). On first connect, pre-populates with 5 minutes of history. Each new candle is emitted as an **individual SSE event** (not an array).\n\n**Wire format:** `event: candle` with a single `Candle` JSON object in `data`.\n\n**Keepalive:** `:heartbeat` comment every 15s.",
+        "tags": ["Streaming"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          {
+            "name": "interval",
+            "in": "query",
+            "required": false,
+            "description": "Candle interval",
+            "schema": { "type": "string", "default": "5s", "enum": ["5s", "15s", "30s", "1m", "15m", "30m", "1h"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of individual candle events",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseCandleEvent" },
+                "example": "id:1\nevent:candle\ndata:{\"ts\":\"2026-03-28T10:15:30Z\",\"symbol\":\"BTC-USDT\",\"open\":69100,\"high\":69150,\"low\":69090,\"close\":69140,\"volume\":1.23}\n"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream/rsi": {
+      "get": {
+        "operationId": "streamRsi",
+        "summary": "Stream RSI (SSE)",
+        "description": "Delta-polls QuestDB every 3s for RSI points newer than the last-seen timestamp. Each RSI point is emitted as an **individual SSE event**.\n\n**Wire format:** `event: rsi` with a single `RsiPoint` JSON object in `data`.\n\n**Keepalive:** `:heartbeat` comment every 15s.\n\n`limit` controls initial history depth — cursor starts at `now - limit × 5s`.",
+        "tags": ["Streaming"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          { "$ref": "#/components/parameters/StreamLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of individual RSI data points",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseRsiEvent" },
+                "example": "id:1\nevent:rsi\ndata:{\"ts\":\"2026-03-28T10:15:30Z\",\"close\":69144.9,\"rsi\":45.23}\n"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream/bollinger": {
+      "get": {
+        "operationId": "streamBollinger",
+        "summary": "Stream Bollinger Bands (SSE)",
+        "description": "Delta-polls QuestDB every 3s for Bollinger Band points newer than the last-seen timestamp. Each point is emitted as an **individual SSE event**.\n\n**Wire format:** `event: bollinger` with a single `BollingerBandPoint` JSON object in `data`.\n\n**Keepalive:** `:heartbeat` comment every 15s.\n\n`limit` controls initial history depth.",
+        "tags": ["Streaming"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          { "$ref": "#/components/parameters/StreamLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of individual Bollinger Band data points",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseBollingerEvent" },
+                "example": "id:1\nevent:bollinger\ndata:{\"ts\":\"2026-03-28T10:15:30Z\",\"close\":69144.9,\"sma20\":68994.38,\"upperBand\":69069.5,\"lowerBand\":68919.25}\n"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream/vwap": {
+      "get": {
+        "operationId": "streamVwap",
+        "summary": "Stream VWAP (SSE)",
+        "description": "Delta-polls QuestDB every 3s for VWAP points newer than the last-seen timestamp. Each point is emitted as an **individual SSE event**.\n\n**Wire format:** `event: vwap` with a single `VwapPoint` JSON object in `data`.\n\n**Keepalive:** `:heartbeat` comment every 15s.\n\n`limit` controls initial history depth.",
+        "tags": ["Streaming"],
+        "parameters": [
+          { "$ref": "#/components/parameters/Symbol" },
+          { "$ref": "#/components/parameters/StreamLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of individual VWAP data points",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseVwapEvent" },
+                "example": "id:1\nevent:vwap\ndata:{\"ts\":\"2026-03-28T10:15:30Z\",\"close\":69144.9,\"vwap\":69034.2}\n"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Symbol": {
+        "name": "symbol",
+        "in": "query",
+        "required": false,
+        "description": "Trading pair instrument ID (e.g. BTC-USDT, ETH-USDT, SOL-USDT)",
+        "schema": {
+          "type": "string",
+          "default": "BTC-USDT",
+          "examples": ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Max data points to return (1–500)",
+        "schema": { "type": "integer", "default": 500, "minimum": 1, "maximum": 500 }
+      },
+      "StreamLimit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Initial history depth — cursor starts at `now - limit × 5s` to pre-populate chart (1–500)",
+        "schema": { "type": "integer", "default": 100, "minimum": 1, "maximum": 500 }
+      }
+    },
+    "schemas": {
+      "Trade": {
+        "type": "object",
+        "required": ["ts", "symbol", "side", "price", "amount"],
+        "properties": {
+          "ts":     { "type": "string", "format": "date-time", "description": "Trade timestamp (ISO 8601)" },
+          "symbol": { "type": "string", "description": "Instrument ID" },
+          "side":   { "type": "string", "enum": ["buy", "sell"], "description": "Trade side" },
+          "price":  { "type": "number", "description": "Execution price in quote currency" },
+          "amount": { "type": "number", "description": "Trade size in base currency" }
+        },
+        "examples": [
+          { "ts": "2026-03-28T10:15:30.289Z", "symbol": "BTC-USDT", "side": "buy", "price": 69350.25, "amount": 0.0012 }
+        ]
+      },
+      "Candle": {
+        "type": "object",
+        "required": ["ts", "symbol", "open", "high", "low", "close", "volume"],
+        "properties": {
+          "ts":     { "type": "string", "format": "date-time", "description": "Candle opening timestamp" },
+          "symbol": { "type": "string", "description": "Instrument ID" },
+          "open":   { "type": "number", "description": "Opening price" },
+          "high":   { "type": "number", "description": "Highest price" },
+          "low":    { "type": "number", "description": "Lowest price" },
+          "close":  { "type": "number", "description": "Closing price" },
+          "volume": { "type": "number", "description": "Total volume" }
+        },
+        "examples": [
+          { "ts": "2026-03-28T10:15:30Z", "symbol": "BTC-USDT", "open": 69340.10, "high": 69355.00, "low": 69338.50, "close": 69350.25, "volume": 1.234 }
+        ]
+      },
+      "OrderBook": {
+        "type": "object",
+        "required": ["ts", "symbol"],
+        "properties": {
+          "ts":        { "type": "string", "format": "date-time", "description": "Snapshot timestamp" },
+          "symbol":    { "type": "string", "description": "Instrument ID" },
+          "bid1Price": { "type": "number", "description": "Best bid price (level 1)" },
+          "bid1Size":  { "type": "number", "description": "Best bid size (level 1)" },
+          "bid2Price": { "type": "number" }, "bid2Size": { "type": "number" },
+          "bid3Price": { "type": "number" }, "bid3Size": { "type": "number" },
+          "bid4Price": { "type": "number" }, "bid4Size": { "type": "number" },
+          "bid5Price": { "type": "number" }, "bid5Size": { "type": "number" },
+          "ask1Price": { "type": "number", "description": "Best ask price (level 1)" },
+          "ask1Size":  { "type": "number", "description": "Best ask size (level 1)" },
+          "ask2Price": { "type": "number" }, "ask2Size": { "type": "number" },
+          "ask3Price": { "type": "number" }, "ask3Size": { "type": "number" },
+          "ask4Price": { "type": "number" }, "ask4Size": { "type": "number" },
+          "ask5Price": { "type": "number" }, "ask5Size": { "type": "number" },
+          "midPrice":  { "type": "number", "description": "Mid-market price: (bid1 + ask1) / 2" },
+          "spread":    { "type": "number", "description": "Bid-ask spread: ask1 - bid1" }
+        }
+      },
+      "Spread": {
+        "type": "object",
+        "required": ["ts", "symbol", "bestBid", "bestAsk", "spread", "midPrice"],
+        "properties": {
+          "ts":       { "type": "string", "format": "date-time", "description": "Bucket timestamp" },
+          "symbol":   { "type": "string", "description": "Instrument ID" },
+          "bestBid":  { "type": "number", "description": "Best bid price" },
+          "bestAsk":  { "type": "number", "description": "Best ask price" },
+          "spread":   { "type": "number", "description": "Bid-ask spread" },
+          "midPrice": { "type": "number", "description": "Mid price" }
+        }
+      },
+      "VwapPoint": {
+        "type": "object",
+        "required": ["ts", "close", "vwap"],
+        "properties": {
+          "ts":    { "type": "string", "format": "date-time" },
+          "close": { "type": "number", "description": "Closing price of the 5s candle" },
+          "vwap":  { "type": "number", "description": "Cumulative volume-weighted average price" }
+        }
+      },
+      "BollingerBandPoint": {
+        "type": "object",
+        "required": ["ts", "close", "sma20", "upperBand", "lowerBand"],
+        "properties": {
+          "ts":        { "type": "string", "format": "date-time" },
+          "close":     { "type": "number", "description": "Closing price of the 5s candle" },
+          "sma20":     { "type": "number", "description": "20-period simple moving average" },
+          "upperBand": { "type": "number", "description": "SMA20 + 2σ" },
+          "lowerBand": { "type": "number", "description": "SMA20 − 2σ" }
+        }
+      },
+      "RsiPoint": {
+        "type": "object",
+        "required": ["ts", "close", "rsi"],
+        "properties": {
+          "ts":    { "type": "string", "format": "date-time" },
+          "close": { "type": "number", "description": "Closing price of the 5s candle" },
+          "rsi":   { "type": "number", "minimum": 0, "maximum": 100, "description": "14-period RSI value" }
+        }
+      },
+      "StatsRow": {
+        "type": "object",
+        "properties": {
+          "total_trades":     { "type": "integer", "description": "Total number of trades in last 24h" },
+          "symbols":          { "type": "integer", "description": "Number of distinct symbols" },
+          "total_volume_usd": { "type": "number",  "description": "Total volume in USD in last 24h" },
+          "first_trade":      { "type": "string", "format": "date-time" },
+          "last_trade":       { "type": "string", "format": "date-time" }
+        }
+      },
+      "SseTradeEvent": {
+        "type": "object",
+        "description": "SSE event: `event: trade` — single Trade object per event",
+        "properties": {
+          "id":    { "type": "string", "description": "Monotonically increasing sequence number" },
+          "event": { "type": "string", "const": "trade" },
+          "data":  { "$ref": "#/components/schemas/Trade" }
+        }
+      },
+      "SseOrderBookEvent": {
+        "type": "object",
+        "description": "SSE event: `event: orderbook` — single OrderBook object per event (LATEST ON guarantees one row)",
+        "properties": {
+          "id":    { "type": "string" },
+          "event": { "type": "string", "const": "orderbook" },
+          "data":  { "$ref": "#/components/schemas/OrderBook" }
+        }
+      },
+      "SseSpreadEvent": {
+        "type": "object",
+        "description": "SSE event: `event: spread` — single Spread object per event",
+        "properties": {
+          "id":    { "type": "string" },
+          "event": { "type": "string", "const": "spread" },
+          "data":  { "$ref": "#/components/schemas/Spread" }
+        }
+      },
+      "SseCandleEvent": {
+        "type": "object",
+        "description": "SSE event: `event: candle` — single Candle object per event (delta-polled, not array)",
+        "properties": {
+          "id":    { "type": "string" },
+          "event": { "type": "string", "const": "candle" },
+          "data":  { "$ref": "#/components/schemas/Candle" }
+        }
+      },
+      "SseRsiEvent": {
+        "type": "object",
+        "description": "SSE event: `event: rsi` — single RsiPoint object per event (delta-polled)",
+        "properties": {
+          "id":    { "type": "string" },
+          "event": { "type": "string", "const": "rsi" },
+          "data":  { "$ref": "#/components/schemas/RsiPoint" }
+        }
+      },
+      "SseBollingerEvent": {
+        "type": "object",
+        "description": "SSE event: `event: bollinger` — single BollingerBandPoint object per event (delta-polled)",
+        "properties": {
+          "id":    { "type": "string" },
+          "event": { "type": "string", "const": "bollinger" },
+          "data":  { "$ref": "#/components/schemas/BollingerBandPoint" }
+        }
+      },
+      "SseVwapEvent": {
+        "type": "object",
+        "description": "SSE event: `event: vwap` — single VwapPoint object per event (delta-polled)",
+        "properties": {
+          "id":    { "type": "string" },
+          "event": { "type": "string", "const": "vwap" },
+          "data":  { "$ref": "#/components/schemas/VwapPoint" }
+        }
+      }
+    }
+  }
+}

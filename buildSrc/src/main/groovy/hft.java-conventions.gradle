@@ -1,0 +1,65 @@
+/**
+ * Shared Java conventions applied to every subproject.
+ *
+ * Apply in each module's build.gradle with:
+ *     plugins { id 'hft.java-conventions' }
+ */
+plugins {
+    id 'java'
+}
+
+group = 'vn.com.baothi'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(26)
+    }
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+}
+
+dependencies {
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// ----- Suppress sun.misc.Unsafe & native-access warnings (Lombok + questdb-client) on Java 22+ -----
+def unsafeJvmArgs = [
+    '--add-opens', 'jdk.unsupported/sun.misc=ALL-UNNAMED',
+    '--sun-misc-unsafe-memory-access=allow',
+    '--enable-native-access=ALL-UNNAMED',
+]
+
+tasks.withType(JavaCompile).configureEach {
+    options.fork = true
+    options.forkOptions.jvmArgs.addAll(unsafeJvmArgs)
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    jvmArgs unsafeJvmArgs
+}
+
+tasks.withType(JavaExec).configureEach {
+    jvmArgs unsafeJvmArgs
+}
+
+// Bake the flags into the executable jar so `java -jar app.jar` also works
+pluginManager.withPlugin('org.springframework.boot') {
+    tasks.named('bootJar') {
+        manifest {
+            attributes 'Add-Opens': 'jdk.unsupported/sun.misc=ALL-UNNAMED'
+        }
+    }
+    springBoot {
+        buildInfo()
+    }
+}
+

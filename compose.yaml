@@ -1,0 +1,107 @@
+name: okx-hft-storage-system
+
+services:
+  questdb:
+    image: questdb/questdb:9.3.3
+    container_name: questdb_hft_pro
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8GB
+        reservations:
+          cpus: '2.0'
+          memory: 4GB
+
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+    # Shared memory for memory-mapped files and JVM
+    shm_size: 256m
+
+    ports:
+      - "9000:9000"   # Web Console & REST API
+      - "9009:9009"   # InfluxDB Line Protocol (ILP) — primary ingestion
+      - "8812:8812"   # PostgreSQL Wire Protocol — SQL queries
+      - "9003:9003"   # Prometheus Metrics
+
+    environment:
+      # ── JVM Heap ────────────────────────────────────────────────────
+      # Explicit heap prevents GC pauses under sustained HFT load
+      - QDB_JAVA_OPTS=-Xms2g -Xmx4g -XX:+UseZGC
+
+      # ── Worker Pools (QuestDB 9.x specialized pools) ───────────────
+      # Network pool: handles HTTP, PG wire, ILP I/O
+      - QDB_SHARED_NETWORK_WORKER_COUNT=2
+      # Query pool: parallel filters, GROUP BY, window functions
+      - QDB_SHARED_QUERY_WORKER_COUNT=2
+      # Write pool: WAL apply, materialized view refresh, housekeeping
+      - QDB_SHARED_WRITE_WORKER_COUNT=2
+
+      # ── ILP Ingestion (TCP port 9009) ──────────────────────────────
+      # 32MB recv buffer — absorbs OKX burst traffic without drops
+      - QDB_LINE_TCP_NET_CONNECTION_RCVBUF=33554432
+      # Commit uncommitted ILP data every 500ms → sub-second query visibility
+      - QDB_LINE_TCP_COMMIT_INTERVAL_DEFAULT=500
+      # Check inactive tables every 1s for pending commits
+      - QDB_LINE_TCP_MAINTENANCE_JOB_INTERVAL=1000
+      # Allow up to 64 simultaneous ILP connections
+      - QDB_LINE_TCP_NET_CONNECTION_LIMIT=64
+
+      # ── WAL & Out-of-Order (O3) Tuning ─────────────────────────────
+      - QDB_CAIRO_WAL_ENABLED_DEFAULT=true
+      # Commit after 500 uncommitted rows → fast visibility for HFT queries
+      - QDB_CAIRO_MAX_UNCOMMITTED_ROWS=500
+      # OKX data arrives nearly in-order; 500ms O3 lag is sufficient
+      - QDB_CAIRO_O3_MAX_LAG=500
+      - QDB_CAIRO_O3_MIN_LAG=100
+      # 256KB O3 column memory (6 columns × 2 × 256KB ≈ 3MB per table, not 96MB)
+      - QDB_CAIRO_O3_COLUMN_MEMORY_SIZE=256k
+      # WAL cleanup every 10s (default 30s) — keeps disk tidy
+      - QDB_CAIRO_WAL_PURGE_INTERVAL=10000
+      # WAL apply: check for new segments every 1ms (default ~100ms)
+      # This is the KEY setting for query visibility latency after ILP/HTTP writes
+      - QDB_CAIRO_WAL_APPLY_TABLE_TIME_QUOTA=1
+      # WAL segment squash: merge small WAL segments for efficiency
+      - QDB_CAIRO_WAL_SQUASH_UNCOMMITTED_ROWS_MULTIPLIER=1.0
+
+      # ── Writer Page Size ────────────────────────────────────────────
+      # 4MB suits our data volume (~40K trades/day); saves memory vs 16MB default
+      - QDB_CAIRO_WRITER_DATA_APPEND_PAGE_SIZE=4m
+
+      # ── PG Wire Protocol (port 8812) ───────────────────────────────
+      # Idle timeout = 5 min — matches R2DBC pool max-idle-time to prevent stale connections
+      - QDB_PG_NET_CONNECTION_TIMEOUT=300000
+      # Allow up to 32 concurrent PG wire connections
+      - QDB_PG_NET_CONNECTION_LIMIT=32
+
+      # ── Query Engine ────────────────────────────────────────────────
+      # 60s timeout for complex CTE/window queries (VWAP, Bollinger, RSI)
+      - QDB_QUERY_TIMEOUT=60s
+      # JIT compilation for fast filter execution
+      - QDB_CAIRO_SQL_JIT_MODE=on
+
+      # ── Monitoring & Telemetry ──────────────────────────────────────
+      - QDB_METRICS_ENABLED=true
+      - QDB_TELEMETRY_ENABLED=false
+
+    volumes:
+      # Database data — persistent across container restarts
+      - ./docker/volume/qdb_data:/var/lib/questdb
+      # Logs — separate mount (must NOT overlap with data volume path)
+      - ./docker/volume/qdb_logs:/var/log/questdb
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9003/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+networks:
+  default:
+    name: hft_network

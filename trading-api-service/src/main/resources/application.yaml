@@ -1,0 +1,63 @@
+spring:
+  application:
+    name: trading-api-service
+  lifecycle:
+    timeout-per-shutdown-phase: 5s
+
+  # --- QuestDB PG Wire (R2DBC) — used for historical queries ---
+  r2dbc:
+    url: r2dbc:postgresql://localhost:8812/qdb
+    username: admin
+    password: quest
+    pool:
+      initial-size: 5
+      max-size: 20
+      max-idle-time: 5m
+      max-life-time: 30m
+      max-acquire-time: 5s
+      max-create-connection-time: 5s
+      # QuestDB's PG wire doesn't support the r2dbc-postgresql driver's
+      # default validate() protocol message — override with a simple query
+      validation-query: "SELECT 1"
+
+server:
+  port: 8443
+  http2:
+    enabled: true
+  ssl:
+    key-store: classpath:keystore.p12
+    key-store-password: changeit
+    key-store-type: PKCS12
+    key-alias: 1
+  shutdown: graceful
+
+# --- Supported symbols (used for validation; ingestion is in okx-feed-handler) ---
+okx:
+  symbols:
+    - BTC-USDT
+    - ETH-USDT
+    - SOL-USDT
+
+logging:
+  level:
+    vn.com.baothi.tradingapi: INFO
+    io.r2dbc.postgresql: WARN
+    reactor.netty: WARN
+    # ── Suppress ALPN "Connection reset by peer" noise ─────────────────────────
+    # Fires when any non-TLS client connects to the HTTPS port (error -104,
+    # ECONNRESET). Triggers include:
+    #   • Spring DevTools restart probe  (http://localhost:8443)
+    #   • Browser address bar without   https:// prefix
+    #   • curl http://localhost:8443/..  (wrong scheme)
+    #   • TCP health checks / port scanners
+    # The server simply drops the connection — no data is exposed. It is a
+    # completely harmless operational event, not a real error. Suppressing at
+    # ERROR level (it never reaches ERROR) keeps logs clean.
+    io.netty.handler.ssl.ApplicationProtocolNegotiationHandler: ERROR
+    # ── Suppress client-disconnect IOException noise ────────────────────────────
+    # Fires at WARN when a browser/client closes an SSE connection mid-stream
+    # (navigation, tab close, back button). The OS aborts the TCP connection
+    # (Windows WSAECONNABORTED / Linux ECONNRESET / Broken pipe) and Netty logs
+    # "An exceptionCaught() event was fired and it reached at the tail of the
+    # pipeline". This is a normal operational event — no data is lost or exposed.
+    io.netty.channel.DefaultChannelPipeline: ERROR

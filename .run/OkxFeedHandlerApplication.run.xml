@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="OkxFeedHandlerApplication" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <module name="okx-hft.okx-feed-handler.main" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="vn.com.baothi.okxfeed.OkxFeedHandlerApplication" />
+    <option name="VM_PARAMETERS" value="--add-opens jdk.unsupported/sun.misc=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>
